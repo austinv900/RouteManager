@@ -1,0 +1,6 @@
+@RouteManager.Api_HostAddress = http://localhost:5287
+
+GET {{RouteManager.Api_HostAddress}}/routes/
+Accept: application/json
+
+###
