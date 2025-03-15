@@ -1,13 +1,14 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using RouteManager.Database;
+using RouteManager.Managers.Options.Route;
 using RouteManager.Models;
-using System.ComponentModel;
+using System.Data;
 using System.Runtime.CompilerServices;
 
 namespace RouteManager.Managers
 {
-    public class RouteManager : IModelManager<Guid, IRoute, RouteManager.CreateOptions, RouteManager.UpdateOptions, RouteManager.SearchOptions>
+    public class RouteManager : IModelManager<Guid, IRoute, RouteCreateOptions, RouteUpdateOptions, RouteQueryOptions>
     {
         protected RoutingContext Database { get; }
 
@@ -19,181 +20,98 @@ namespace RouteManager.Managers
             Logger = logger;
         }
 
-        #region Options
-
-        public class CreateOptions
-        {
-            public string Name { get; set; } = Guid.NewGuid().ToString("D").Substring(8);
-
-            public DateTimeOffset DispatchTime { get; set; } = DateTimeOffset.UtcNow;
-
-            public IDictionary<string, string>? Metadata { get; set; } = new Dictionary<string, string>();
-
-            public ICollection<StopCreateOptions>? Stops { get; set; } = new List<StopCreateOptions>();
-        }
-
-        public class UpdateOptions
-        {
-            public string? Name { get; set; }
-
-            public DateTimeOffset? DispatchTime { get; set; }
-
-            public ICollection<string>? RemoveMetadata { get; set; } = new List<string>();
-
-            public IDictionary<string, string>? AddMetadata { get; set; } = new Dictionary<string, string>();
-
-            public ICollection<Guid>? RemoveStops { get; set; } = new List<Guid>();
-
-            public ICollection<StopUpdateOptions>? AddStops { get; set; } = new List<StopUpdateOptions>();
-        }
-
-        public class SearchOptions
-        {
-            public Guid? Id { get; set; }
-
-            public string? Name { get; set; }
-
-            public DateTimeOffset? DispatchStartTime { get; set; }
-
-            public DateTimeOffset? DispatchEndTime { get; set; }
-
-            public int? StopMinimum { get; set; }
-
-            public int? StopMaximum { get; set; }
-
-            [DefaultValue(10)]
-            public int? Limit { get; set; } = 10;
-        }
-
-        public class StopCreateOptions
-        {
-            public string? Name { get; set; }
-
-            public int? Sequence { get; set; }
-
-            public string? Address { get; set; }
-
-            public double? Latitude { get; set; }
-
-            public double? Longitude { get; set; }
-
-            public DateTimeOffset? TimeWindowBegin { get; set; }
-
-            public DateTimeOffset? TimeWindowEnd { get; set; }
-
-            public TimeSpan? DwellTime { get; set; }
-        }
-
-        public class StopUpdateOptions
-        {
-            public Guid Id { get; set; }
-
-            public int? Sequence { get; set; }
-
-            public string? Address { get; set; }
-
-            public double? Latitude { get; set; }
-
-            public double? Longitude { get; set; }
-
-            public DateTimeOffset? TimeWindowBegin { get; set; }
-
-            public DateTimeOffset? TimeWindowEnd { get; set; }
-
-            public TimeSpan? DwellTime { get; set; }
-        }
-
-        #endregion
-
         #region Interface Methods
 
-        public async Task<IRoute> Create(CreateOptions options, CancellationToken cancellationToken = default)
+        public async Task<IRoute> CreateModel(RouteCreateOptions createOptions, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(options.Name))
-            {
-                Logger.LogDebug("Route creation failed: Missing name");
-                throw new ArgumentNullException(nameof(options.Name), "Missing route name");
-            }
-
-            if (options.DispatchTime == default)
-            {
-                Logger.LogDebug("Route creation failed: Missing dispatch time");
-                throw new ArgumentNullException(nameof(options.DispatchTime), "Missing dispatch time");
-            }
-
             await using IDbContextTransaction transaction = await Database.Database.BeginTransactionAsync(cancellationToken);
+            DateTimeOffset now = DateTimeOffset.UtcNow;
             RoutePlan plan = new RoutePlan();
 
             try
             {
-                plan.Name = options.Name;
-                plan.DispatchTime = options.DispatchTime;
-                await Database.Routes.AddAsync(plan, cancellationToken);
-                Logger.LogDebug("Route {ID} ({NAME}) added to entity tracking", plan.Id, plan.Name);
-                
-                if (options.Metadata != null && options.Metadata.Count > 0)
+                // Name Creation
+                if (string.IsNullOrEmpty(createOptions.Name))
                 {
-                    IEnumerable<RoutePlanMetadata> metadata = options.Metadata.Select(x => new RoutePlanMetadata(x.Key, x.Value, plan.Id));
-                    await Database.RouteMetadata.AddRangeAsync(metadata, cancellationToken);
+                    plan.Name = $"{now:yyyyMMddHHmmss}";
+                    Logger.LogDebug("No name provided in createOptions, using {NAME}", plan.Name);
+                }
+                else
+                {
+                    plan.Name = createOptions.Name;
+                    Logger.LogDebug("Using route name {NAME}", createOptions.Name);
                 }
 
-                if (options.Stops != null && options.Stops.Count > 0)
+                // Dispatch Time
+                if (!createOptions.DispatchTime.HasValue)
                 {
-                    // TODO: Add Stop Processing
+                    plan.DispatchTime = now;
+                    Logger.LogDebug("No dispatch time provided for {NAME}, using {TIME}", plan.Name, now);
+                }
+                else
+                {
+                    plan.DispatchTime = createOptions.DispatchTime.Value;
+                    Logger.LogDebug("Using dispatch time {TIME} for route {NAME}", plan.DispatchTime, plan.Name);
+                }
+
+                await Database.Routes.AddAsync(plan, cancellationToken);
+                Logger.LogDebug("Route {ID} ({NAME}) added to entity tracking", plan.Id, plan.Name);
+
+                // Add Metadata
+                if (createOptions.Metadata != null && createOptions.Metadata.Count > 0)
+                {
+                    foreach (var x in createOptions.Metadata)
+                    {
+                        RoutePlanMetadata meta = new RoutePlanMetadata(x.Key, x.Value, plan.Id);
+                        await Database.RouteMetadata.AddAsync(meta, cancellationToken);
+                        Logger.LogDebug("Added metadata for route {RID}: {KEY} => {VALUE}", plan.Id, x.Key, x.Value);
+                    }
                 }
 
                 await Database.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
+                Logger.LogInformation("Created route {NAME} ({ID})", plan.Name, plan.Id);
                 return plan;
             }
-            catch
+            catch (Exception e)
             {
                 await transaction.RollbackAsync(cancellationToken);
+                Logger.LogError(e, "Failed to create route {NAME}", plan.Name);
                 throw;
             }
         }
 
-        public async Task<bool> Delete(IRoute route, CancellationToken cancellationToken = default)
+        public async Task<int> DeleteModel(Guid[] modelIds, CancellationToken cancellationToken = default)
         {
-            if (route == null)
+            if (modelIds == null || modelIds.Length == 0)
             {
-                Logger.LogDebug("Route deletion failed: Missing route instance");
-                return false;
-            }
-
-            return await Delete([route], cancellationToken) > 0;
-        }
-
-        public async Task<int> Delete(IEnumerable<IRoute> routes, CancellationToken cancellationToken = default)
-        {
-            if (routes == null || routes.Count() == 0)
-            {
-                Logger.LogDebug("Route deletion failed: Missing route list");
+                Logger.LogDebug("No model IDs provided for deletion");
                 return 0;
             }
 
-            RoutePlan[] routePlans = routes.Where(x => x is RoutePlan)
-                .Select(x => (RoutePlan)x)
-                .ToArray();
+            Logger.LogDebug("Preparing to delete routes with IDs {IDS}", string.Join(',', modelIds));
+            RoutePlan[] plans = Database.Routes.Where(x => modelIds.Contains(x.Id)).ToArray();
 
-            if (routePlans.Length == 0)
+            if (plans.Length == 0)
             {
-                Logger.LogDebug("Route deletion failed: Items arn't RoutePlans");
+                Logger.LogDebug("No routes found with provided IDs");
                 return 0;
             }
 
-            Database.Routes.RemoveRange(routePlans);
+            Database.Routes.RemoveRange(plans);
             int exe = await Database.SaveChangesAsync(cancellationToken);
             Logger.LogWarning("Successfully removed {COUNT} route objects from data source", exe);
             return exe;
         }
 
-        public async Task<IRoute> Update(Guid routeId, UpdateOptions options, CancellationToken cancellationToken = default)
+        public async Task<IRoute> UpdateModel(Guid modelId, RouteUpdateOptions updateOptions, CancellationToken cancellationToken = default)
         {
-            IQueryable<RoutePlan> query = Database.Routes.Where(x => x.Id == routeId);
+            IQueryable<RoutePlan> query = Database.Routes.Where(x => x.Id == modelId);
+            Logger.LogDebug("Searching for route {ID}", modelId);
 
-            if (options.RemoveMetadata != null || options.AddMetadata != null)
+            if (updateOptions.RemoveMetadata != null || updateOptions.AddMetadata != null)
             {
+                Logger.LogDebug("Including metadata");
                 query = query.Include(x => x.RouteMetadata);
             }
 
@@ -201,86 +119,103 @@ namespace RouteManager.Managers
 
             if (plan == null)
             {
-                Logger.LogError("Failed to update route with {ID}: Route doesn't exist", routeId);
-                throw new KeyNotFoundException($"Failed to update route with {routeId:D}: Route doesn't exist");
+                Logger.LogError("Failed to update route with {ID}: Route doesn't exist", modelId);
+                throw new KeyNotFoundException($"Failed to update route with {modelId:D}: Route doesn't exist");
             }
 
-            if (!string.IsNullOrWhiteSpace(options.Name) && options.Name != plan.Name)
-            {
-                plan.Name = options.Name;
-            }
+            using IDbContextTransaction transaction = await Database.Database.BeginTransactionAsync(cancellationToken);
 
-            if (options.DispatchTime.HasValue)
+            try
             {
-                plan.DispatchTime = options.DispatchTime.Value;
-            }
-
-            if (options.RemoveMetadata != null && options.RemoveMetadata.Count > 0)
-            {
-                foreach (string key in options.RemoveMetadata)
+                if (!string.IsNullOrWhiteSpace(updateOptions.Name) && updateOptions.Name != plan.Name)
                 {
-                    IRouteMetadata? meta = plan.Metadata.FirstOrDefault(x => x.Key.Equals(key, StringComparison.InvariantCultureIgnoreCase));
+                    plan.Name = updateOptions.Name;
+                }
 
-                    if (meta != null)
+                if (updateOptions.DispatchTime.HasValue)
+                {
+                    plan.DispatchTime = updateOptions.DispatchTime.Value;
+                }
+
+                if (updateOptions.RemoveMetadata != null && updateOptions.RemoveMetadata.Count > 0)
+                {
+                    foreach (string key in updateOptions.RemoveMetadata)
                     {
-                        Database.Remove(meta);
-                        Logger.LogDebug("Removing metadata key {KEY}", key);
+                        IRouteMetadata? meta = plan.Metadata.FirstOrDefault(x => x.Key.Equals(key, StringComparison.InvariantCultureIgnoreCase));
+
+                        if (meta != null)
+                        {
+                            Database.Remove(meta);
+                            Logger.LogDebug("Removing metadata key {KEY}", key);
+                        }
                     }
                 }
-            }
 
-            if (options.AddMetadata != null && options.AddMetadata.Count > 0)
+                if (updateOptions.AddMetadata != null && updateOptions.AddMetadata.Count > 0)
+                {
+                    foreach (var x in updateOptions.AddMetadata)
+                    {
+                        RoutePlanMetadata metaData = new RoutePlanMetadata(x.Key, x.Value, plan.Id);
+                        await Database.RouteMetadata.AddAsync(metaData, cancellationToken);
+                        Logger.LogDebug("Added metadata for route {ID}: {NAME} => {VALUE}", plan.Id, metaData.Key, metaData.Value);
+                    }
+                }
+
+                await Database.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                Logger.LogInformation("Updated route {NAME} ({ID})", plan.Name, plan.Id);
+                return plan;
+            }
+            catch (Exception e)
             {
-                IEnumerable<RoutePlanMetadata> meta = options.AddMetadata.Select(x => new RoutePlanMetadata(x.Key, x.Value, plan.Id));
-                await Database.RouteMetadata.AddRangeAsync(meta, cancellationToken);
+                await transaction.RollbackAsync(cancellationToken);
+                Logger.LogError(e, "Failed to update Route: {ID}", modelId);
+                throw;
             }
-
-            await Database.SaveChangesAsync(cancellationToken);
-            return plan;
         }
 
-        public async IAsyncEnumerable<IRoute> Find(SearchOptions? options, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        public async IAsyncEnumerable<IRoute> LookupModels(RouteQueryOptions? lookupOptions, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             IQueryable<RoutePlan> query = Database.Routes
                 .Include(x => x.RouteStops.OrderBy(n => n.Sequence))
                 .Include(x => x.RouteMetadata)
                 .OrderByDescending(x => x.DispatchTime);
 
-            if (options != null)
+            if (lookupOptions != null)
             {
-                if (options.Id.HasValue)
+                if (lookupOptions.Id.HasValue)
                 {
-                    query = query.Where(x => x.Id == options.Id.Value);
+                    query = query.Where(x => x.Id == lookupOptions.Id.Value);
                 }
 
-                if (!string.IsNullOrEmpty(options.Name))
+                if (!string.IsNullOrEmpty(lookupOptions.Name))
                 {
-                    query = query.Where(x => x.Name.Contains(options.Name, StringComparison.InvariantCultureIgnoreCase));
+                    query = query.Where(x => x.Name.Contains(lookupOptions.Name, StringComparison.InvariantCultureIgnoreCase));
                 }
 
-                if (options.DispatchStartTime.HasValue)
+                if (lookupOptions.DispatchStartTime.HasValue)
                 {
-                    query = query.Where(x => x.DispatchTime >= options.DispatchStartTime.Value);
+                    query = query.Where(x => x.DispatchTime >= lookupOptions.DispatchStartTime.Value);
                 }
 
-                if (options.DispatchEndTime.HasValue)
+                if (lookupOptions.DispatchEndTime.HasValue)
                 {
-                    query = query.Where(x => x.DispatchTime <= options.DispatchEndTime.Value);
+                    query = query.Where(x => x.DispatchTime <= lookupOptions.DispatchEndTime.Value);
                 }
 
-                if (options.StopMinimum.HasValue)
+                if (lookupOptions.StopMinimum.HasValue)
                 {
-                    query = query.Where(x => x.Stops.Count() >= options.StopMinimum.Value);
+                    query = query.Where(x => x.Stops.Count() >= lookupOptions.StopMinimum.Value);
                 }
 
-                if (options.StopMaximum.HasValue)
+                if (lookupOptions.StopMaximum.HasValue)
                 {
-                    query = query.Where(x => x.Stops.Count() <= options.StopMaximum.Value);
+                    query = query.Where(x => x.Stops.Count() <= lookupOptions.StopMaximum.Value);
                 }
 
-                if (options.Limit.HasValue)
+                if (lookupOptions.Limit.HasValue)
                 {
-                    query = query.Take(options.Limit.Value);
+                    query = query.Take(lookupOptions.Limit.Value);
                 }
                 else
                 {
